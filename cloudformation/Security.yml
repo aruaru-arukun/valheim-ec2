@@ -1,0 +1,120 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: ec2-velheim security
+
+Parameters:
+  ###############################
+  # 外部からのパラメーター
+  ###############################
+  Env:
+    Type: String
+    Description: 環境種別
+  ServiceName:
+    Type: String
+    Description: サービス名
+  ProductName:
+    Type: String
+    Description: プロダクト名
+
+  ###############################
+  # パラメーター
+  ###############################
+  ProfileName:
+    Type: String
+    Default: profile
+  ProfileRoleName:
+    Type: String
+    Default: profile-role
+  SecurityGroupName:
+    Type: String
+    Default: sg
+
+###############################
+# リソース
+###############################
+Resources:
+  ###############################
+  # IAM
+  ###############################
+  ### ProfileRole ###
+  ProfileRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      RoleName: !Sub ${ProductName}-${ServiceName}-${ProfileRoleName}-${Env}
+
+  ### InstanceProfile ###
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${ProductName}-${ServiceName}-${ProfileName}-${Env}
+      Path: /
+      Roles:
+        - !Ref ProfileRole
+
+  ###############################
+  # SecurityGroup
+  ###############################
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProductName}-${ServiceName}-${SecurityGroupName}-${Env}
+      GroupDescription: velheim server sg
+      VpcId:
+        Fn::ImportValue: !Sub ${ProductName}-common-vpc-${Env}
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          Description: Valheim
+          FromPort: 2456
+          IpProtocol: tcp
+          ToPort: 2458
+        - CidrIp: 0.0.0.0/0
+          Description: Valheim
+          FromPort: 2456
+          IpProtocol: udp
+          ToPort: 2458
+        - CidrIpv6: ::/0
+          Description: Valheim
+          FromPort: 2456
+          IpProtocol: tcp
+          ToPort: 2458
+        - CidrIpv6: ::/0
+          Description: Valheim
+          FromPort: 2456
+          IpProtocol: udp
+          ToPort: 2458
+        - CidrIp: 0.0.0.0/0
+          Description: ssh
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProductName}-${ServiceName}-${SecurityGroupName}-${Env}
+        - Key: ProductName
+          Value: !Ref ProductName
+        - Key: ServiceName
+          Value: !Ref ServiceName
+        - Key: Env
+          Value: !Ref Env
+
+###############################
+# 出力
+###############################
+Outputs:
+  InstanceProfileArn:
+    Value: !GetAtt InstanceProfile.Arn
+    Export:
+      Name: !Sub ${ProductName}-${ServiceName}-${ProfileName}-${Env}-arn
+  SecurityGroupId:
+    Value: !Ref SecurityGroup
+    Export:
+      Name: !Sub ${ProductName}-${ServiceName}-${SecurityGroupName}-${Env}

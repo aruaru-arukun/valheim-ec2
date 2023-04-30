@@ -1,0 +1,203 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: ec2-velheim application
+
+Parameters:
+  ###############################
+  # 外部からのパラメーター
+  ###############################
+  Env:
+    Type: String
+    Description: 環境種別
+  ServiceName:
+    Type: String
+    Description: サービス名
+  ProductName:
+    Type: String
+    Description: プロダクト名
+
+  ###############################
+  # パラメーター
+  ###############################
+  InstanceName:
+    Type: String
+    Default: instance
+  ProfileName:
+    Type: String
+    Default: profile
+  KeyPairName:
+    Type: String
+    Default: keypair
+  ValheimPassword:
+    Type: String
+    Default: '{{resolve:ssm-secure:VALHEIM_PASSWORD:latest}}'
+  LaunchTemplateName:
+    Type: String
+    Default: template
+
+###############################
+# リソース
+###############################
+Resources:
+  ###############################
+  # EC2
+  ###############################
+  ### LaunchTemplate ###
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${ProductName}-${ServiceName}-${LaunchTemplateName}-${Env}
+      LaunchTemplateData:
+        InstanceMarketOptions:
+          MarketType: spot
+          SpotOptions:
+            InstanceInterruptionBehavior: stop
+            SpotInstanceType: persistent
+        KeyName: !Ref KeyPair
+        ImageId: ami-01b32aa8589df6208
+        BlockDeviceMappings:
+          - DeviceName: /dev/sdh
+            Ebs:
+              DeleteOnTermination: true
+              Iops: 3000
+              VolumeSize: 10
+              VolumeType: gp3
+        EbsOptimized: false
+        IamInstanceProfile:
+          Arn:
+            Fn::ImportValue: !Sub ${ProductName}-${ServiceName}-profile-${Env}-arn
+        InstanceType: t3.medium
+        Monitoring:
+          Enabled: true
+        NetworkInterfaces:
+          - AssociatePublicIpAddress: true
+            DeviceIndex: "0"
+            DeleteOnTermination: true
+            Groups:
+              - Fn::ImportValue: !Sub ${ProductName}-${ServiceName}-sg-${Env}
+            SubnetId:
+              Fn::ImportValue: !Sub ${ProductName}-common-public-a-${Env}
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            # パッケージを最新に更新
+            sudo yum update -y
+
+            # dockerインストール
+            sudo yum install -y docker
+            sudo systemctl start docker
+            sudo systemctl enable docker
+            sudo usermod -a -G docker ec2-user
+
+            # docker composeインストール
+            sudo mkdir -p /usr/local/lib/docker/cli-plugins
+            sudo curl \
+              -L https://github.com/docker/compose/releases/download/v2.17.3/docker-compose-$(uname -s)-$(uname -m) \
+              -o /usr/local/lib/docker/cli-plugins/docker-compose
+            sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+            sudo ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/bin/docker-compose
+
+            # タイムゾーン設定
+            sudo timedatectl set-timezone Asia/Tokyo
+
+            # EBSマウント
+            sudo mkfs -t ext4 /dev/nvme1n1
+            sudo mount /dev/nvme1n1 $HOME/valheim-server
+
+            # EBS自動マウント設定
+            uuid=$(sudo blkid /dev/nvme1n1 -o export | grep ^UUID)
+            echo -e "$uuid\t$HOME/valheim-server\text4\tdefaults\t1\t1" >> /etc/fstab
+
+            # サーバー起動・停止時に実行するコマンドを設定
+            sudo cat > /etc/init.d/app-start << EOF
+            case "$1" in
+              start)
+                docker-compose up -d
+                ;;
+              stop)
+                docker-compose down
+                ;;
+              *) break ;;
+            esac
+            EOF
+            sudo chmod +x /etc/init.d/app-start
+            sudo chkconfig --add app-start
+            sudo chkconfig app-start on
+
+            # valheimのサーバー設定
+            sudo mkdir -p $HOME/valheim-server/config $HOME/valheim-server/data
+            sudo chmod -R 777 $HOME/valheim-server
+            sudo cd $HOME/valheim-server
+            sudo cat > $HOME/valheim-server/valheim.env << EOF
+            SERVER_NAME=[JP]arukun-server
+            WORLD_NAME=arukun-world
+            SERVER_PASS=${ValheimPassword}
+            SERVER_PUBLIC=false
+            RESTART_CRON=""
+            TZ=Asia/Tokyo
+            BACKUPS_DIRECTORY=$HOME/valheim-server/config
+            BACKUPS_MAX_COUNT=8
+            EOF
+
+            # Valheimのdocker-composeファイルを取得
+            curl -o $HOME/valheim-server/docker-compose.yaml https://raw.githubusercontent.com/lloesche/valheim-server-docker/main/docker-compose.yaml
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub ${ProductName}-${ServiceName}-${InstanceName}-${Env}
+              - Key: ServiceName
+                Value: !Ref ServiceName
+              - Key: ProductName
+                Value: !Ref ProductName
+              - Key: Env
+                Value: !Ref Env
+
+  ### Instance ###
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      Monitoring: true
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: "0"
+          DeleteOnTermination: true
+          GroupSet:
+            - Fn::ImportValue: !Sub ${ProductName}-${ServiceName}-sg-${Env}
+          SubnetId:
+            Fn::ImportValue: !Sub ${ProductName}-common-public-a-${Env}
+
+  ### KeyPair ###
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub ${ProductName}-${ServiceName}-${KeyPairName}-${Env}
+      Tags:
+        - Key: ServiceName
+          Value: !Ref ServiceName
+        - Key: ProductName
+          Value: !Ref ProductName
+        - Key: Env
+          Value: !Ref Env
+
+  ### ElasticIP ###
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: ServiceName
+          Value: !Ref ServiceName
+        - Key: ProductName
+          Value: !Ref ProductName
+        - Key: Env
+          Value: !Ref Env
+
+  ### ElasticIPAssociate ###
+  ElasticIPAssociate:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ElasticIP.AllocationId
+      InstanceId: !Ref Instance
