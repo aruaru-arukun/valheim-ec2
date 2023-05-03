@@ -70,7 +70,9 @@ Resources:
             Statement:
               - Effect: "Allow"
                 Action:
-                  - "*"
+                  - "ec2:AttachVolume"
+                  - "ec2:DescribeVolumes"
+                  - "ec2:DescribeInstances"
                 Resource:
                   - "*"
       Path: "/"

@@ -51,6 +51,17 @@ Resources:
   ###############################
   # EC2
   ###############################
+  ### Volume ###
+  Volume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Retain
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}a
+      Encrypted: true
+      Size: 10
+      VolumeType: gp3
+      Iops: 3000
+
   ### LaunchTemplate ###
   LaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
@@ -64,17 +75,10 @@ Resources:
             SpotInstanceType: persistent
         KeyName: !Ref KeyPair
         ImageId: ami-01b32aa8589df6208
-        BlockDeviceMappings:
-          - DeviceName: /dev/sdh
-            Ebs:
-              DeleteOnTermination: true
-              Iops: 3000
-              VolumeSize: 10
-              VolumeType: gp3
         IamInstanceProfile:
           Arn:
             Fn::ImportValue: !Sub ${ProductName}-${ServiceName}-profile-${Env}-arn
-        InstanceType: t3.nano
+        InstanceType: t3.medium
         NetworkInterfaces:
           - AssociatePublicIpAddress: true
             DeviceIndex: "0"
@@ -103,53 +107,71 @@ Resources:
             sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
             sudo ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/bin/docker-compose
 
+            # AWS CLIの設定
+            sudo mkdir $HOME/.aws
+            sudo cat > $HOME/.aws/config << EOF
+              [default]
+              region=${AWS::Region}
+              output=json
+            EOF
+
             # タイムゾーン設定
             sudo timedatectl set-timezone Asia/Tokyo
 
             # ホームディレクトリ設定（EC2初期化時はRootユーザーが利用されるため）
             export HOME=/home/ec2-user
 
-            # EBSマウント
-            sudo mkdir $HOME/valheim-server
-            sudo mkfs -t xfs /dev/nvme1n1
-            sudo mount /dev/nvme1n1 $HOME/valheim-server
-
-            # EBS自動マウント設定
-            uuid=$(sudo blkid /dev/nvme1n1 -o export | grep ^UUID)
-            echo -e "$uuid\t/$HOME/valheim-server\txfs\tdefaults\t1\t1" >> /etc/fstab
-
             # サーバー起動・停止時に実行するコマンドを設定
             sudo cat > /etc/systemd/system/command.service << EOF
-            [Unit]
-            Description=custom commnad
+              [Unit]
+              Description=custom commnad
 
-            [Service]
-            ExecStop=cd $HOME/valheim-server && docker-compose down
-            ExecStart=cd $HOME/valheim-server && docker-compose up -d
+              [Service]
+              ExecStop=cd $HOME/valheim-server && docker-compose down
+              ExecStart=cd $HOME/valheim-server && docker-compose up -d
 
-            [Install]
-            WantedBy=multi-user.target
+              [Install]
+              WantedBy=multi-user.target
             EOF
             sudo systemctl enable command.service
             sudo systemctl start command.service
 
-            # valheimのサーバー設定
-            sudo mkdir -p $HOME/valheim-server/config $HOME/valheim-server/data
-            sudo cd $HOME/valheim-server
-            sudo cat > $HOME/valheim-server/valheim.env << EOF
-            SERVER_NAME=[JP]arukun-server
-            WORLD_NAME=arukun-world
-            SERVER_PASS=${ValheimPassword}
-            SERVER_PUBLIC=true
-            RESTART_CRON=""
-            TZ=Asia/Tokyo
-            BACKUPS_DIRECTORY=$HOME/valheim-server/config
-            BACKUPS_MAX_COUNT=8
+            # EBSマウントスクリプト作成
+            sudo cat > $HOME/mount_ebs.sh << EOF
+              # EBSアタッチ
+              instance_id=$(cat /var/lib/cloud/data/instance-id)
+              aws ec2 attach-volume --volume-id ${Volume} --instance-id $(cat /var/lib/cloud/data/instance-id) --device /dev/sdh
+
+              # EBSマウント
+              sudo mkdir $HOME/valheim-server
+              sudo mkfs -t xfs /dev/nvme1n1
+              sudo mount /dev/nvme1n1 $HOME/valheim-server
+
+              # EBS自動マウント設定
+              sudo blkid /dev/nvme1n1 -o export | grep ^UUID
+              echo -e "$?\t/$HOME/valheim-server\txfs\tdefaults\t1\t1" >> /etc/fstab
             EOF
 
-            # Valheimのdocker-composeファイルを取得
-            curl -o $HOME/valheim-server/docker-compose.yaml https://raw.githubusercontent.com/lloesche/valheim-server-docker/main/docker-compose.yaml
-            cd $HOME/valheim-server && docker-compose up -d
+            # Valheim初期化スクリプト作成
+            sudo cat > $HOME/init_valheim.sh << EOF
+              # Valheim設定
+              sudo mkdir -p $HOME/valheim-server/config $HOME/valheim-server/data
+              sudo cd $HOME/valheim-server
+              sudo cat > $HOME/valheim-server/valheim.env << EOF
+                SERVER_NAME=[JP]arukun-server
+                WORLD_NAME=arukun-world
+                SERVER_PASS=${ValheimPassword}
+                SERVER_PUBLIC=true
+                RESTART_CRON=""
+                TZ=Asia/Tokyo
+                BACKUPS_DIRECTORY=$HOME/valheim-server/config
+                BACKUPS_MAX_COUNT=8
+              EOF
+
+              # Valheimのdocker-composeファイルを取得
+              curl -o $HOME/valheim-server/docker-compose.yaml https://raw.githubusercontent.com/lloesche/valheim-server-docker/main/docker-compose.yaml
+            EOF
+
         TagSpecifications:
           - ResourceType: instance
             Tags:
