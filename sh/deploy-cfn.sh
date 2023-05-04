@@ -8,7 +8,6 @@ Usage: $(basename "$0") [OPTION]...
     -c app      [必須]デプロイするCfnを指定するオプション。app|sec|monに対応しており、その他はエラーを出力する。
     -e stg     [必須]デプロイする環境を指定するオプション。pro|stgに対応しており、その他はエラーを出力する。
     -p profile  [必須]AWS CLIのプロファイルを指定するオプション。
-    -i version  [-cにecsを指定した場合必須]ECRのイメージタグ
 EOM
     exit 2
 }
@@ -36,9 +35,6 @@ while getopts c:e:p:i:h OPT; do
         ;;
     p)
         PROFILE=${OPTARG}
-        ;;
-    i)
-        IMAGE_VERSION=${OPTARG}
         ;;
     h | \?)
         usage && exit 1
@@ -84,18 +80,6 @@ then
     TEMPLATE_PATH='./cloudformation/Security.yml'
     STACK_NAME="${PRODUCT_NAME}-${SERVICE_NAME}-security-${ENV}"
 
-# ECR.yml
-elif [ "${CFN}" = "ecr" ];
-then
-    TEMPLATE_PATH='./cloudformation/ECR.yml'
-    STACK_NAME="${PRODUCT_NAME}-${SERVICE_NAME}-ecr-${ENV}"
-
-# Monitoring.yml
-elif [ "${CFN}" = "mon" ];
-then
-    TEMPLATE_PATH='./cloudformation/Monitoring.yml'
-    STACK_NAME="${PRODUCT_NAME}-${SERVICE_NAME}-monitoring-${ENV}"
-
 else
     echo "error->cfn not supported->${CFN}"
     exit 1
@@ -103,7 +87,12 @@ fi
 
 # デプロイ
 OUTPUT=""
-OUTPUT=$(rain deploy ${TEMPLATE_PATH} ${STACK_NAME} -y -p ${PROFILE} --params Env=${ENV},ServiceName=${SERVICE_NAME},ProductName=${PRODUCT_NAME} 2>&1)
+if [ "${CFN}" = "app" ];
+then
+    OUTPUT=$(rain deploy ${TEMPLATE_PATH} ${STACK_NAME} -y -p ${PROFILE} --params Env=${ENV},ServiceName=${SERVICE_NAME},ProductName=${PRODUCT_NAME},ValheimPassword=VALHEIM_PASSWORD 2>&1)
+else
+    OUTPUT=$(rain deploy ${TEMPLATE_PATH} ${STACK_NAME} -y -p ${PROFILE} --params Env=${ENV},ServiceName=${SERVICE_NAME},ProductName=${PRODUCT_NAME} 2>&1)
+fi
 RESULT=$?
 
 # CloudFormationに変更がなかった場合もエラーになるため、エラーメッセージで判定して回避

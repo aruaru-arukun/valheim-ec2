@@ -38,8 +38,8 @@ Parameters:
     Type: String
     Default: ec2-stop-schedule
   ValheimPassword:
-    Type: String
-    Default: "{{resolve:ssm-secure:VALHEIM_PASSWORD:latest}}"
+    Type : AWS::SSM::Parameter::Value<String>
+    Default: ''
   CancelSpotInstanceFunctionName:
     Type: String
     Default: cancel-spot-instance-function
@@ -58,7 +58,7 @@ Resources:
     Properties:
       AvailabilityZone: !Sub ${AWS::Region}a
       Encrypted: true
-      Size: 10
+      Size: 11
       VolumeType: gp3
       Iops: 3000
 
@@ -136,37 +136,30 @@ Resources:
             sudo systemctl enable command.service
             sudo systemctl start command.service
 
-            # EBSマウントスクリプト作成
-            sudo cat > $HOME/mount_ebs.sh << EOF
-              # EBSアタッチ
-              instance_id=$(cat /var/lib/cloud/data/instance-id)
+            sudo mkdir $HOME/valheim-server
+
+            # Valheimの設定ファイル作成
+            sudo cat > $HOME/valheim.env << EOF
+              SERVER_NAME=[JP]arukun-server
+              WORLD_NAME=arukun-world
+              SERVER_PASS=${ValheimPassword}
+              SERVER_PUBLIC=true
+              RESTART_CRON=""
+              TZ=Asia/Tokyo
+              BACKUPS_DIRECTORY=$HOME/valheim-server/config
+              BACKUPS_MAX_COUNT=8
+            EOF
+
+            # EBSアタッチスクリプト
+            sudo cat > $HOME/attach_ebs.sh << EOF
               aws ec2 attach-volume --volume-id ${Volume} --instance-id $(cat /var/lib/cloud/data/instance-id) --device /dev/sdh
-
-              # EBSマウント
-              sudo mkdir $HOME/valheim-server
-              sudo mkfs -t xfs /dev/nvme1n1
-              sudo mount /dev/nvme1n1 $HOME/valheim-server
-
-              # EBS自動マウント設定
-              sudo blkid /dev/nvme1n1 -o export | grep ^UUID
-              echo -e "$?\t/$HOME/valheim-server\txfs\tdefaults\t1\t1" >> /etc/fstab
             EOF
 
             # Valheim初期化スクリプト作成
             sudo cat > $HOME/init_valheim.sh << EOF
               # Valheim設定
               sudo mkdir -p $HOME/valheim-server/config $HOME/valheim-server/data
-              sudo cd $HOME/valheim-server
-              sudo cat > $HOME/valheim-server/valheim.env << EOF
-                SERVER_NAME=[JP]arukun-server
-                WORLD_NAME=arukun-world
-                SERVER_PASS=${ValheimPassword}
-                SERVER_PUBLIC=true
-                RESTART_CRON=""
-                TZ=Asia/Tokyo
-                BACKUPS_DIRECTORY=$HOME/valheim-server/config
-                BACKUPS_MAX_COUNT=8
-              EOF
+              sudo mv $HOME/valheim.env $HOME/valheim-server
 
               # Valheimのdocker-composeファイルを取得
               curl -o $HOME/valheim-server/docker-compose.yaml https://raw.githubusercontent.com/lloesche/valheim-server-docker/main/docker-compose.yaml
