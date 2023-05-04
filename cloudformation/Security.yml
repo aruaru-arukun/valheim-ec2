@@ -1,0 +1,211 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: ec2-velheim security
+
+Parameters:
+  ###############################
+  # 外部からのパラメーター
+  ###############################
+  Env:
+    Type: String
+    Description: 環境種別
+  ServiceName:
+    Type: String
+    Description: サービス名
+  ProductName:
+    Type: String
+    Description: プロダクト名
+
+  ###############################
+  # パラメーター
+  ###############################
+  ProfileName:
+    Type: String
+    Default: profile
+  ProfileRoleName:
+    Type: String
+    Default: profile-role
+  ProfilePolicyName:
+    Type: String
+    Default: profile-policy
+  SecurityGroupName:
+    Type: String
+    Default: sg
+  EC2SchedulePolicyName:
+    Type: String
+    Default: ec2-schedule-policy
+  EC2ScheduleRoleName:
+    Type: String
+    Default: ec2-schedule-role
+  CancelSpotInstancePolicyName:
+    Type: String
+    Default: cancle-spot-instance-policy
+  CancelSpotInstanceRoleName:
+    Type: String
+    Default: cancle-spot-instance-role
+
+###############################
+# リソース
+###############################
+Resources:
+  ###############################
+  # IAM
+  ###############################
+  ### ProfileRole ###
+  ProfileRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub ${ProductName}-${ServiceName}-${ProfilePolicyName}-${Env}
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "ec2:AttachVolume"
+                  - "ec2:DescribeVolumes"
+                  - "ec2:DescribeInstances"
+                Resource:
+                  - "*"
+      Path: "/"
+      RoleName: !Sub ${ProductName}-${ServiceName}-${ProfileRoleName}-${Env}
+
+  ### InstanceProfile ###
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${ProductName}-${ServiceName}-${ProfileName}-${Env}
+      Path: /
+      Roles:
+        - !Ref ProfileRole
+
+  ### EC2ScheduleRole ###
+  EC2ScheduleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProductName}-${ServiceName}-${EC2ScheduleRoleName}-${Env}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - scheduler.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: !Sub ${ProductName}-${ServiceName}-${EC2SchedulePolicyName}-${Env}
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:StartInstances
+                  - ec2:StopInstances
+                  - sqs:*
+                Resource:
+                  - "*"
+
+  ### CancelSpotInstanceRole ###
+  CancelSpotInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProductName}-${ServiceName}-${CancelSpotInstanceRoleName}-${Env}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${ProductName}-${ServiceName}-${CancelSpotInstancePolicyName}-${Env}
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeTags
+                  - ec2:CancelSpotInstanceRequests
+                Resource:
+                  - "*"
+      Path: /
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+
+  ###############################
+  # SecurityGroup
+  ###############################
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ProductName}-${ServiceName}-${SecurityGroupName}-${Env}
+      GroupDescription: velheim server sg
+      VpcId:
+        Fn::ImportValue: !Sub ${ProductName}-common-vpc-${Env}
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          Description: Valheim
+          FromPort: 2456
+          IpProtocol: tcp
+          ToPort: 2458
+        - CidrIp: 0.0.0.0/0
+          Description: Valheim
+          FromPort: 2456
+          IpProtocol: udp
+          ToPort: 2458
+        - CidrIpv6: ::/0
+          Description: Valheim
+          FromPort: 2456
+          IpProtocol: tcp
+          ToPort: 2458
+        - CidrIpv6: ::/0
+          Description: Valheim
+          FromPort: 2456
+          IpProtocol: udp
+          ToPort: 2458
+        - CidrIp: 0.0.0.0/0
+          Description: ssh
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProductName}-${ServiceName}-${SecurityGroupName}-${Env}
+        - Key: ProductName
+          Value: !Ref ProductName
+        - Key: ServiceName
+          Value: !Ref ServiceName
+        - Key: Env
+          Value: !Ref Env
+
+###############################
+# 出力
+###############################
+Outputs:
+  InstanceProfileArn:
+    Value: !GetAtt InstanceProfile.Arn
+    Export:
+      Name: !Sub ${ProductName}-${ServiceName}-${ProfileName}-${Env}-arn
+  EC2ScheduleRoleArn:
+    Value: !GetAtt EC2ScheduleRole.Arn
+    Export:
+      Name: !Sub ${ProductName}-${ServiceName}-${EC2ScheduleRoleName}-${Env}-arn
+  CancelSpotInstanceRoleArn:
+    Value: !GetAtt CancelSpotInstanceRole.Arn
+    Export:
+      Name: !Sub ${ProductName}-${ServiceName}-${CancelSpotInstanceRoleName}-${Env}-arn
+  SecurityGroupId:
+    Value: !Ref SecurityGroup
+    Export:
+      Name: !Sub ${ProductName}-${ServiceName}-${SecurityGroupName}-${Env}

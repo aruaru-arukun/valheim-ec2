@@ -1,0 +1,2 @@
+export PRODUCT_NAME=arukun
+export SERVICE_NAME=valheim

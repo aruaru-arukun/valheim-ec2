@@ -1,0 +1,307 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: ec2-velheim application
+
+Parameters:
+  ###############################
+  # 外部からのパラメーター
+  ###############################
+  Env:
+    Type: String
+    Description: 環境種別
+  ServiceName:
+    Type: String
+    Description: サービス名
+  ProductName:
+    Type: String
+    Description: プロダクト名
+
+  ###############################
+  # パラメーター
+  ###############################
+  InstanceName:
+    Type: String
+    Default: instance
+  ProfileName:
+    Type: String
+    Default: profile
+  KeyPairName:
+    Type: String
+    Default: keypair
+  LaunchTemplateName:
+    Type: String
+    Default: template
+  EC2StartScheduleName:
+    Type: String
+    Default: ec2-start-schedule
+  EC2StopScheduleName:
+    Type: String
+    Default: ec2-stop-schedule
+  ValheimPassword:
+    Type : AWS::SSM::Parameter::Value<String>
+    Default: ''
+  CancelSpotInstanceFunctionName:
+    Type: String
+    Default: cancel-spot-instance-function
+
+###############################
+# リソース
+###############################
+Resources:
+  ###############################
+  # EC2
+  ###############################
+  ### Volume ###
+  Volume:
+    Type: AWS::EC2::Volume
+    DeletionPolicy: Retain
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}a
+      Encrypted: true
+      Size: 11
+      VolumeType: gp3
+      Iops: 3000
+
+  ### LaunchTemplate ###
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${ProductName}-${ServiceName}-${LaunchTemplateName}-${Env}
+      LaunchTemplateData:
+        InstanceMarketOptions:
+          MarketType: spot
+          SpotOptions:
+            InstanceInterruptionBehavior: stop
+            SpotInstanceType: persistent
+        KeyName: !Ref KeyPair
+        ImageId: ami-01b32aa8589df6208
+        IamInstanceProfile:
+          Arn:
+            Fn::ImportValue: !Sub ${ProductName}-${ServiceName}-profile-${Env}-arn
+        InstanceType: t3.medium
+        NetworkInterfaces:
+          - AssociatePublicIpAddress: true
+            DeviceIndex: "0"
+            DeleteOnTermination: true
+            Groups:
+              - Fn::ImportValue: !Sub ${ProductName}-${ServiceName}-sg-${Env}
+            SubnetId:
+              Fn::ImportValue: !Sub ${ProductName}-common-public-a-${Env}
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            # パッケージを最新に更新
+            sudo yum update -y
+
+            # dockerインストール
+            sudo yum install -y docker
+            sudo systemctl start docker
+            sudo systemctl enable docker
+            sudo usermod -a -G docker ec2-user
+
+            # docker composeインストール
+            sudo mkdir -p /usr/local/lib/docker/cli-plugins
+            sudo curl \
+              -L https://github.com/docker/compose/releases/download/v2.17.3/docker-compose-$(uname -s)-$(uname -m) \
+              -o /usr/local/lib/docker/cli-plugins/docker-compose
+            sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+            sudo ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/bin/docker-compose
+
+            # AWS CLIの設定
+            sudo mkdir $HOME/.aws
+            sudo cat > $HOME/.aws/config << EOF
+              [default]
+              region=${AWS::Region}
+              output=json
+            EOF
+
+            # タイムゾーン設定
+            sudo timedatectl set-timezone Asia/Tokyo
+
+            # ホームディレクトリ設定（EC2初期化時はRootユーザーが利用されるため）
+            export HOME=/home/ec2-user
+
+            # サーバー起動・停止時に実行するコマンドを設定
+            sudo cat > /etc/systemd/system/command.service << EOF
+              [Unit]
+              Description=custom commnad
+
+              [Service]
+              ExecStop=cd $HOME/valheim-server && docker-compose down
+              ExecStart=cd $HOME/valheim-server && docker-compose up -d
+
+              [Install]
+              WantedBy=multi-user.target
+            EOF
+            sudo systemctl enable command.service
+            sudo systemctl start command.service
+
+            sudo mkdir $HOME/valheim-server
+
+            # Valheimの設定ファイル作成
+            sudo cat > $HOME/valheim.env << EOF
+              SERVER_NAME=[JP]arukun-server
+              WORLD_NAME=arukun-world
+              SERVER_PASS=${ValheimPassword}
+              SERVER_PUBLIC=true
+              RESTART_CRON=""
+              TZ=Asia/Tokyo
+              BACKUPS_DIRECTORY=$HOME/valheim-server/config
+              BACKUPS_MAX_COUNT=8
+            EOF
+
+            # EBSアタッチスクリプト
+            sudo cat > $HOME/attach_ebs.sh << EOF
+              aws ec2 attach-volume --volume-id ${Volume} --instance-id $(cat /var/lib/cloud/data/instance-id) --device /dev/sdh
+            EOF
+
+            # Valheim初期化スクリプト作成
+            sudo cat > $HOME/init_valheim.sh << EOF
+              # Valheim設定
+              sudo mkdir -p $HOME/valheim-server/config $HOME/valheim-server/data
+              sudo mv $HOME/valheim.env $HOME/valheim-server
+
+              # Valheimのdocker-composeファイルを取得
+              curl -o $HOME/valheim-server/docker-compose.yaml https://raw.githubusercontent.com/lloesche/valheim-server-docker/main/docker-compose.yaml
+            EOF
+
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub ${ProductName}-${ServiceName}-${InstanceName}-${Env}
+              - Key: ServiceName
+                Value: !Ref ServiceName
+              - Key: ProductName
+                Value: !Ref ProductName
+              - Key: Env
+                Value: !Ref Env
+
+  ### Instance ###
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      Monitoring: true
+      EbsOptimized: false
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+
+  ### KeyPair ###
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub ${ProductName}-${ServiceName}-${KeyPairName}-${Env}
+      Tags:
+        - Key: ServiceName
+          Value: !Ref ServiceName
+        - Key: ProductName
+          Value: !Ref ProductName
+        - Key: Env
+          Value: !Ref Env
+
+  ### ElasticIP ###
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: ServiceName
+          Value: !Ref ServiceName
+        - Key: ProductName
+          Value: !Ref ProductName
+        - Key: Env
+          Value: !Ref Env
+
+  ### ElasticIPAssociate ###
+  ElasticIPAssociate:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt ElasticIP.AllocationId
+      InstanceId: !Ref Instance
+
+  ### EC2StartSchedule ###
+  EC2StartSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub ${ProductName}-${ServiceName}-${EC2StartScheduleName}-${Env}
+      Description: Start EC2 Instance
+      ScheduleExpression: cron(0 10 ? * MON,TUE,WED,THU,FRI *)
+      ScheduleExpressionTimezone: Japan
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: ENABLED
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:ec2:startInstances
+        Input: !Sub |-
+          {
+            "InstanceIds": ["${Instance}"]
+          }
+        RoleArn:
+          Fn::ImportValue: !Sub ${ProductName}-${ServiceName}-ec2-schedule-role-${Env}-arn
+
+  ### EC2StopSchedule ###
+  EC2StopSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub ${ProductName}-${ServiceName}-${EC2StopScheduleName}-${Env}
+      Description: Stop EC2 Instance
+      ScheduleExpression: cron(0 2 ? * MON,TUE,WED,THU,FRI *)
+      ScheduleExpressionTimezone: Japan
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      State: ENABLED
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:ec2:stopInstances
+        Input: !Sub |-
+          {
+            "InstanceIds": ["${Instance}"]
+          }
+        RoleArn:
+          Fn::ImportValue: !Sub ${ProductName}-${ServiceName}-ec2-schedule-role-${Env}-arn
+
+  ###############################
+  # Lambda
+  ###############################
+  ### CancelSpotInstanceFunction ###
+  CancelSpotInstanceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${ProductName}-${ServiceName}-${CancelSpotInstanceFunctionName}-${Env}
+      CodeUri: ./Lambda/CancelSpotInstance
+      Handler: lambda_handler.handler
+      Runtime: python3.10
+      Timeout: 900
+      Role:
+        Fn::ImportValue: !Sub ${ProductName}-${ServiceName}-cancle-spot-instance-role-${Env}-arn
+      Tags:
+        ServiceName: !Ref ServiceName
+        ProductName: !Ref ProductName
+        Env: !Ref Env
+
+  ### CancelSpotInstanceFunction ###
+  EC2TerminationEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "EC2 instance termination event rule"
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EC2 Instance State-change Notification
+        detail:
+          state:
+            - terminated
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CancelSpotInstanceFunction.Arn
+          Id: EC2TerminationEventTarget
+
+  ### CancelSpotInstancePermission ###
+  CancelSpotInstancePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt CancelSpotInstanceFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EC2TerminationEventRule.Arn
